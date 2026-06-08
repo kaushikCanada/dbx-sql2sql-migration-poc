@@ -270,9 +270,10 @@ BEGIN
     DECLARE @lock NVARCHAR(255) = N'pk_reserve_' + @table_name;
     EXEC sp_getapplock @Resource = @lock, @LockMode = 'Exclusive', @LockOwner = 'Session';
 
-    DECLARE @cur BIGINT = CAST(ISNULL(IDENT_CURRENT(@table_name), 0) AS BIGINT);
+    DECLARE @cur      BIGINT = CAST(ISNULL(IDENT_CURRENT(@table_name), 0) AS BIGINT);
+    DECLARE @new_seed BIGINT = @cur + @block_size;
     SET @first_id = @cur + 1;
-    DBCC CHECKIDENT (@table_name, RESEED, @cur + @block_size) WITH NO_INFOMSGS;
+    DBCC CHECKIDENT (@table_name, RESEED, @new_seed) WITH NO_INFOMSGS;
 
     EXEC sp_releaseapplock @Resource = @lock, @LockOwner = 'Session';
 END;
