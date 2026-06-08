@@ -1,0 +1,57 @@
+version: "3.9"
+
+services:
+  source_db:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: source_db
+    environment:
+      ACCEPT_EULA: "Y"
+      SA_PASSWORD: "SourcePass123!"
+      MSSQL_PID: Developer
+    ports:
+      - "1433:1433"
+    healthcheck:
+      test: ["CMD", "/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", "SourcePass123!", "-Q", "SELECT 1", "-No"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  target_db:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: target_db
+    environment:
+      ACCEPT_EULA: "Y"
+      SA_PASSWORD: "TargetPass123!"
+      MSSQL_PID: Developer
+    ports:
+      - "1434:1433"
+    healthcheck:
+      test: ["CMD", "/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", "TargetPass123!", "-Q", "SELECT 1", "-No"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    container_name: migration_app
+    depends_on:
+      source_db:
+        condition: service_healthy
+      target_db:
+        condition: service_healthy
+    environment:
+      SOURCE_SERVER: source_db
+      SOURCE_PORT: "1433"
+      SOURCE_DB: sourcedb
+      SOURCE_USER: sa
+      SOURCE_PASSWORD: "SourcePass123!"
+      TARGET_SERVER: target_db
+      TARGET_PORT: "1433"
+      TARGET_DB: targetdb
+      TARGET_USER: sa
+      TARGET_PASSWORD: "TargetPass123!"
+      MIRROR_PATH: "/app/_mirror"
+    volumes:
+      - .:/app
+    working_dir: /app
+    command: ["tail", "-f", "/dev/null"]

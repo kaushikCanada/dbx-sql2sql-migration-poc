@@ -1,0 +1,19 @@
+# Delta mirror — runtime-generated, not code
+_mirror/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Spark
+derby.log
+metastore_db/
+
+# Ivy cache (downloaded JARs — fetched at runtime)
+.ivy2.5.2/
+
+# Environment / secrets
+.env
+*.env
