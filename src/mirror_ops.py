@@ -17,60 +17,59 @@ SKIP_MIRROR_RELOAD: bool = os.environ.get("SKIP_MIRROR_RELOAD", "false").lower()
 # Path of the Delta state table — persists CT watermark across process restarts.
 _STATE_PATH: str = os.path.join(MIRROR_BASE, "_state")
 
-# Wave-ordered table config: wave_number → [(table_name, select_sql)].
-# Tables without a direct fac_id (mpi, pho_schedule_details) are mirrored without
-# a facility scope filter — matching the _MIRROR_FAC_EXCLUSIONS pattern in the
-# production notebook.
-WAVE_CONFIG: dict[int, list[tuple[str, str]]] = {
-    2: [
-        ("facility", (
-            "SELECT fac_id, name, prov, deleted "
-            "FROM dbo.facility"
-        )),
-    ],
-    3: [
-        ("mpi", (
-            "SELECT mpi_id, first_name, last_name, date_of_birth, sex, "
-            "deleted, created_by, created_date "
-            "FROM dbo.mpi"
-        )),
-        ("clients", (
-            "SELECT client_id, fac_id, mpi_id, deleted, "
-            "admission_date, discharge_date, created_by, created_date "
-            "FROM dbo.clients"
-        )),
-    ],
-    5: [
-        ("pho_phys_order", (
-            "SELECT phys_order_id, client_id, fac_id, drug_name, strength, "
-            "directions, order_date, active_flag, deleted, created_by, created_date "
-            "FROM dbo.pho_phys_order"
-        )),
-        ("pho_order_schedule", (
-            "SELECT order_schedule_id, phys_order_id, fac_id, deleted, dose_value, "
-            "directions, mon, tues, wed, thurs, fri, sat, sun, created_by, created_date "
-            "FROM dbo.pho_order_schedule"
-        )),
-    ],
-    6: [
-        ("pho_schedule", (
-            "SELECT schedule_id, order_schedule_id, phys_order_id, fac_id, deleted, "
-            "description, start_time, dose, created_by, created_date "
-            "FROM dbo.pho_schedule"
-        )),
-        ("pho_schedule_details", (
-            "SELECT pho_schedule_detail_id, pho_schedule_id, schedule_date, dose, "
-            "deleted, perform_by, perform_date, perform_initials, created_by, created_date "
-            "FROM dbo.pho_schedule_details"
-        )),
-    ],
+# Wave ordering: wave_number → [table_name, ...].
+# Determines FK-safe processing order — parents always before children.
+WAVE_CONFIG: dict[int, list[str]] = {
+    2: ["facility"],
+    3: ["mpi", "clients"],
+    5: ["pho_phys_order", "pho_order_schedule"],
+    6: ["pho_schedule", "pho_schedule_details"],
+}
+
+# Mirror queries: table_name → SELECT SQL.
+# Separated from wave ordering so each concern lives in one place.
+MIRROR_QUERIES: dict[str, str] = {
+    "facility": (
+        "SELECT fac_id, name, prov, deleted "
+        "FROM dbo.facility"
+    ),
+    "mpi": (
+        "SELECT mpi_id, first_name, last_name, date_of_birth, sex, "
+        "deleted, created_by, created_date "
+        "FROM dbo.mpi"
+    ),
+    "clients": (
+        "SELECT client_id, fac_id, mpi_id, deleted, "
+        "admission_date, discharge_date, created_by, created_date "
+        "FROM dbo.clients"
+    ),
+    "pho_phys_order": (
+        "SELECT phys_order_id, client_id, fac_id, drug_name, strength, "
+        "directions, order_date, active_flag, deleted, created_by, created_date "
+        "FROM dbo.pho_phys_order"
+    ),
+    "pho_order_schedule": (
+        "SELECT order_schedule_id, phys_order_id, fac_id, deleted, dose_value, "
+        "directions, mon, tues, wed, thurs, fri, sat, sun, created_by, created_date "
+        "FROM dbo.pho_order_schedule"
+    ),
+    "pho_schedule": (
+        "SELECT schedule_id, order_schedule_id, phys_order_id, fac_id, deleted, "
+        "description, start_time, dose, created_by, created_date "
+        "FROM dbo.pho_schedule"
+    ),
+    "pho_schedule_details": (
+        "SELECT pho_schedule_detail_id, pho_schedule_id, schedule_date, dose, "
+        "deleted, perform_by, perform_date, perform_initials, created_by, created_date "
+        "FROM dbo.pho_schedule_details"
+    ),
 }
 
 # Flat ordered list of all tables — wave order preserved.
 ALL_TABLES: list[str] = [
     table
     for wave in sorted(WAVE_CONFIG)
-    for table, _ in WAVE_CONFIG[wave]
+    for table in WAVE_CONFIG[wave]
 ]
 
 # Tables that carry a fac_id column and should be scoped to src_fac_ids.
@@ -126,7 +125,8 @@ def run_mirror(spark: SparkSession, src_fac_ids: list[int], src_conn) -> list[di
     results: list[dict] = []
 
     for wave in sorted(WAVE_CONFIG):
-        for table, base_sql in WAVE_CONFIG[wave]:
+        for table in WAVE_CONFIG[wave]:
+            base_sql = MIRROR_QUERIES[table]
             t0 = time.time()
 
             # Inject facility scope filter for tables that carry fac_id.
