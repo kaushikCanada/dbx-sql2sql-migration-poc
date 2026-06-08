@@ -1,341 +1,453 @@
-CREATE DATABASE targetdb;    -- create the target database that migrated data lands in
+-- Target DB init: all PKs are IDENTITY (reserve_pk_block + IDENTITY_INSERT pattern).
+-- Each table has a src_* traceability column pointing back to its source PK.
+-- Staging tables have no FK/IDENTITY constraints — Spark writes freely.
+-- SPs move staging → target atomically with IDENTITY_INSERT ON.
+
+CREATE DATABASE targetdb;
 GO
 
-USE targetdb;               -- all subsequent statements run inside targetdb
+USE targetdb;
 GO
 
--- =============================================================================
--- MAIN TABLES
--- These are the live tables the application will read from after migration.
--- They mirror the source schema but each adds a src_* traceability column
--- so we can always trace a target row back to its original source ID.
--- The delta SP also uses src_* to find the right row to update/delete.
--- =============================================================================
+-- ============================================================
+-- MAIN TABLES  (wave order: 2 → 3 → 5 → 6)
+-- ============================================================
 
+-- Wave 2
 CREATE TABLE dbo.facility (
-    fac_id     INT IDENTITY(1,1) PRIMARY KEY,  -- auto-increment PK; real value set by PK reservation, not auto-generated
+    fac_id     INT          IDENTITY(1,1) NOT NULL,
+    src_fac_id INT          NOT NULL,
     name       VARCHAR(100) NOT NULL,
-    prov       CHAR(2)      NOT NULL,
-    deleted    CHAR(1)      NOT NULL DEFAULT 'N',
-    src_fac_id INT          NULL     -- original fac_id from source DB; NULL until migrated row is inserted
+    prov       VARCHAR(2)   NOT NULL,
+    deleted    VARCHAR(1)   NOT NULL DEFAULT 'N',
+    CONSTRAINT PK_facility PRIMARY KEY (fac_id)
 );
 GO
 
+-- Wave 3
+CREATE TABLE dbo.mpi (
+    mpi_id        INT         IDENTITY(1,1) NOT NULL,
+    src_mpi_id    INT         NOT NULL,
+    first_name    VARCHAR(50) NULL,
+    last_name     VARCHAR(50) NULL,
+    date_of_birth DATETIME    NULL,
+    sex           CHAR(1)     NULL,
+    deleted       VARCHAR(1)  NOT NULL DEFAULT 'N',
+    created_by    VARCHAR(60) NOT NULL DEFAULT 'system',
+    created_date  DATETIME    NOT NULL DEFAULT GETDATE(),
+    CONSTRAINT PK_mpi PRIMARY KEY (mpi_id)
+);
+GO
+
+-- Wave 3
 CREATE TABLE dbo.clients (
-    client_id     INT IDENTITY(1,1) PRIMARY KEY,  -- auto-increment PK; real value set by PK reservation
-    fac_id        INT          NOT NULL REFERENCES dbo.facility(fac_id),  -- FK to target facility (translated from source fac_id)
-    first_name    VARCHAR(100) NOT NULL,
-    last_name     VARCHAR(100) NOT NULL,
-    deleted       CHAR(1)      NOT NULL DEFAULT 'N',
-    src_client_id INT          NULL  -- original client_id from source; used by delta SP to find this row on updates/deletes
+    client_id      INT         IDENTITY(1,1) NOT NULL,
+    src_client_id  INT         NOT NULL,
+    fac_id         INT         NOT NULL,
+    mpi_id         INT         NULL,
+    deleted        VARCHAR(1)  NOT NULL DEFAULT 'N',
+    admission_date DATETIME    NULL,
+    discharge_date DATETIME    NULL,
+    created_by     VARCHAR(60) NOT NULL DEFAULT 'system',
+    created_date   DATETIME    NOT NULL DEFAULT GETDATE(),
+    CONSTRAINT PK_clients          PRIMARY KEY (client_id),
+    CONSTRAINT FK_clients_facility FOREIGN KEY (fac_id) REFERENCES dbo.facility(fac_id),
+    CONSTRAINT FK_clients_mpi      FOREIGN KEY (mpi_id) REFERENCES dbo.mpi(mpi_id)
 );
 GO
 
--- =============================================================================
--- STAGING TABLES
--- Temporary landing zone that Spark JDBC writes into before the load SPs run.
---
--- WHY STAGING EXISTS:
---   Spark cannot call stored procedures or do IDENTITY_INSERT directly.
---   So the flow is: Spark writes raw pre-mapped rows here with no constraints,
---   then a SP moves them into the real table atomically with full PK/FK control.
---
--- KEY DESIGN CHOICE: no IDENTITY columns, no FK constraints on staging tables.
---   Spark writes the already-translated PKs and FKs directly as plain integers.
---   The SPs trust what staging contains — no re-translation needed inside SQL.
--- =============================================================================
+-- Wave 5
+CREATE TABLE dbo.pho_phys_order (
+    phys_order_id     INT           IDENTITY(1,1) NOT NULL,
+    src_phys_order_id INT           NOT NULL,
+    client_id         INT           NOT NULL,
+    fac_id            INT           NOT NULL,
+    drug_name         VARCHAR(500)  NULL,
+    strength          VARCHAR(30)   NULL,
+    directions        VARCHAR(1000) NULL,
+    order_date        DATETIME      NOT NULL,
+    active_flag       CHAR(1)       NOT NULL DEFAULT 'Y',
+    deleted           VARCHAR(1)    NOT NULL DEFAULT 'N',
+    created_by        VARCHAR(60)   NOT NULL DEFAULT 'system',
+    created_date      DATETIME      NOT NULL DEFAULT GETDATE(),
+    CONSTRAINT PK_pho_phys_order     PRIMARY KEY (phys_order_id),
+    CONSTRAINT FK_phys_order_clients FOREIGN KEY (client_id) REFERENCES dbo.clients(client_id)
+);
+GO
 
--- Holds facility rows waiting to be loaded into dbo.facility.
--- fac_id here is already the reserved target PK — not the original source ID.
+-- Wave 5
+CREATE TABLE dbo.pho_order_schedule (
+    order_schedule_id     INT           IDENTITY(1,1) NOT NULL,
+    src_order_schedule_id INT           NOT NULL,
+    phys_order_id         INT           NOT NULL,
+    fac_id                INT           NOT NULL,
+    deleted               VARCHAR(1)    NOT NULL DEFAULT 'N',
+    dose_value            VARCHAR(31)   NULL,
+    directions            VARCHAR(1000) NULL,
+    mon                   CHAR(1)       NULL,
+    tues                  CHAR(1)       NULL,
+    wed                   CHAR(1)       NULL,
+    thurs                 CHAR(1)       NULL,
+    fri                   CHAR(1)       NULL,
+    sat                   CHAR(1)       NULL,
+    sun                   CHAR(1)       NULL,
+    created_by            VARCHAR(60)   NOT NULL DEFAULT 'system',
+    created_date          DATETIME      NOT NULL DEFAULT GETDATE(),
+    CONSTRAINT PK_pho_order_schedule        PRIMARY KEY (order_schedule_id),
+    CONSTRAINT FK_order_schedule_phys_order FOREIGN KEY (phys_order_id) REFERENCES dbo.pho_phys_order(phys_order_id)
+);
+GO
+
+-- Wave 6
+CREATE TABLE dbo.pho_schedule (
+    schedule_id           INT         IDENTITY(1,1) NOT NULL,
+    src_schedule_id       INT         NOT NULL,
+    order_schedule_id     INT         NULL,
+    phys_order_id         INT         NULL,
+    fac_id                INT         NOT NULL,
+    deleted               CHAR(1)     NOT NULL DEFAULT 'N',
+    description           VARCHAR(35) NULL,
+    start_time            VARCHAR(4)  NULL,
+    dose                  VARCHAR(31) NULL,
+    created_by            VARCHAR(60) NOT NULL DEFAULT 'system',
+    created_date          DATETIME    NOT NULL DEFAULT GETDATE(),
+    CONSTRAINT PK_pho_schedule                PRIMARY KEY (schedule_id),
+    CONSTRAINT FK_pho_schedule_order_schedule FOREIGN KEY (order_schedule_id) REFERENCES dbo.pho_order_schedule(order_schedule_id)
+);
+GO
+
+-- Wave 6
+CREATE TABLE dbo.pho_schedule_details (
+    pho_schedule_detail_id     BIGINT      IDENTITY(1,1) NOT NULL,
+    src_pho_schedule_detail_id BIGINT      NOT NULL,
+    pho_schedule_id            INT         NOT NULL,
+    schedule_date              DATETIME    NOT NULL,
+    dose                       VARCHAR(31) NULL,
+    deleted                    VARCHAR(1)  NOT NULL DEFAULT 'N',
+    perform_by                 VARCHAR(60) NULL,
+    perform_date               DATETIME    NULL,
+    perform_initials           VARCHAR(4)  NULL,
+    created_by                 VARCHAR(60) NOT NULL DEFAULT 'system',
+    created_date               DATETIME    NOT NULL DEFAULT GETDATE(),
+    CONSTRAINT PK_pho_schedule_details      PRIMARY KEY (pho_schedule_detail_id),
+    CONSTRAINT FK_schedule_details_schedule FOREIGN KEY (pho_schedule_id) REFERENCES dbo.pho_schedule(schedule_id)
+);
+GO
+
+-- ============================================================
+-- STAGING TABLES  (no FK or IDENTITY constraints — Spark-friendly)
+-- ============================================================
+
 CREATE TABLE dbo.facility_staging (
-    fac_id     INT          NOT NULL,   -- reserved target PK assigned by Python before this write
+    fac_id     INT          NOT NULL,
+    src_fac_id INT          NOT NULL,
     name       VARCHAR(100) NOT NULL,
-    prov       CHAR(2)      NOT NULL,
-    deleted    CHAR(1)      NOT NULL DEFAULT 'N',
-    src_fac_id INT          NOT NULL    -- original source fac_id; written into facility.src_fac_id for traceability
+    prov       VARCHAR(2)   NOT NULL,
+    deleted    VARCHAR(1)   NOT NULL
 );
 GO
 
--- Holds client rows waiting to be loaded into dbo.clients.
+CREATE TABLE dbo.mpi_staging (
+    mpi_id        INT         NOT NULL,
+    src_mpi_id    INT         NOT NULL,
+    first_name    VARCHAR(50) NULL,
+    last_name     VARCHAR(50) NULL,
+    date_of_birth DATETIME    NULL,
+    sex           CHAR(1)     NULL,
+    deleted       VARCHAR(1)  NOT NULL,
+    created_by    VARCHAR(60) NOT NULL,
+    created_date  DATETIME    NOT NULL
+);
+GO
+
 CREATE TABLE dbo.clients_staging (
-    client_id     INT          NOT NULL,  -- reserved target PK assigned by Python
-    fac_id        INT          NOT NULL,  -- already translated to target fac_id by Python before this write
-    first_name    VARCHAR(100) NOT NULL,
-    last_name     VARCHAR(100) NOT NULL,
-    deleted       CHAR(1)      NOT NULL DEFAULT 'N',
-    src_client_id INT          NOT NULL   -- original source client_id for traceability
+    client_id      INT         NOT NULL,
+    src_client_id  INT         NOT NULL,
+    fac_id         INT         NOT NULL,
+    mpi_id         INT         NULL,
+    deleted        VARCHAR(1)  NOT NULL,
+    admission_date DATETIME    NULL,
+    discharge_date DATETIME    NULL,
+    created_by     VARCHAR(60) NOT NULL,
+    created_date   DATETIME    NOT NULL
 );
 GO
 
--- Holds CT delta rows for incremental catch-up runs (Job 3).
--- One row per changed client since the last CT version checkpoint.
--- operation mirrors SQL Server's SYS_CHANGE_OPERATION:
---   'I' = row was inserted on source after the mirror snapshot
---   'U' = row was updated on source after the mirror snapshot
---   'D' = row was hard-deleted on source after the mirror snapshot
--- Data columns are NULL for 'D' because the row no longer exists on source —
--- only the src_client_id is available from CHANGETABLE for deleted rows.
+CREATE TABLE dbo.pho_phys_order_staging (
+    phys_order_id     INT           NOT NULL,
+    src_phys_order_id INT           NOT NULL,
+    client_id         INT           NOT NULL,
+    fac_id            INT           NOT NULL,
+    drug_name         VARCHAR(500)  NULL,
+    strength          VARCHAR(30)   NULL,
+    directions        VARCHAR(1000) NULL,
+    order_date        DATETIME      NOT NULL,
+    active_flag       CHAR(1)       NOT NULL,
+    deleted           VARCHAR(1)    NOT NULL,
+    created_by        VARCHAR(60)   NOT NULL,
+    created_date      DATETIME      NOT NULL
+);
+GO
+
+CREATE TABLE dbo.pho_order_schedule_staging (
+    order_schedule_id     INT           NOT NULL,
+    src_order_schedule_id INT           NOT NULL,
+    phys_order_id         INT           NOT NULL,
+    fac_id                INT           NOT NULL,
+    deleted               VARCHAR(1)    NOT NULL,
+    dose_value            VARCHAR(31)   NULL,
+    directions            VARCHAR(1000) NULL,
+    mon                   CHAR(1)       NULL,
+    tues                  CHAR(1)       NULL,
+    wed                   CHAR(1)       NULL,
+    thurs                 CHAR(1)       NULL,
+    fri                   CHAR(1)       NULL,
+    sat                   CHAR(1)       NULL,
+    sun                   CHAR(1)       NULL,
+    created_by            VARCHAR(60)   NOT NULL,
+    created_date          DATETIME      NOT NULL
+);
+GO
+
+CREATE TABLE dbo.pho_schedule_staging (
+    schedule_id           INT         NOT NULL,
+    src_schedule_id       INT         NOT NULL,
+    order_schedule_id     INT         NULL,
+    phys_order_id         INT         NULL,
+    fac_id                INT         NOT NULL,
+    deleted               CHAR(1)     NOT NULL,
+    description           VARCHAR(35) NULL,
+    start_time            VARCHAR(4)  NULL,
+    dose                  VARCHAR(31) NULL,
+    created_by            VARCHAR(60) NOT NULL,
+    created_date          DATETIME    NOT NULL
+);
+GO
+
+CREATE TABLE dbo.pho_schedule_details_staging (
+    pho_schedule_detail_id     BIGINT      NOT NULL,
+    src_pho_schedule_detail_id BIGINT      NOT NULL,
+    pho_schedule_id            INT         NOT NULL,
+    schedule_date              DATETIME    NOT NULL,
+    dose                       VARCHAR(31) NULL,
+    deleted                    VARCHAR(1)  NOT NULL,
+    perform_by                 VARCHAR(60) NULL,
+    perform_date               DATETIME    NULL,
+    perform_initials           VARCHAR(4)  NULL,
+    created_by                 VARCHAR(60) NOT NULL,
+    created_date               DATETIME    NOT NULL
+);
+GO
+
+-- Delta staging: source IDs kept as-is; SP resolves to target IDs via src_* lookups.
 CREATE TABLE dbo.clients_delta_staging (
-    src_client_id INT          NOT NULL,  -- source client_id; used to match the right target row
-    operation     CHAR(1)      NOT NULL,  -- 'I', 'U', or 'D'
-    fac_id        INT          NULL,      -- source fac_id; NULL for D rows since data is gone
-    first_name    VARCHAR(100) NULL,      -- NULL for D rows
-    last_name     VARCHAR(100) NULL,      -- NULL for D rows
-    deleted       CHAR(1)      NULL       -- NULL for D rows
+    src_client_id  INT        NOT NULL,
+    operation      CHAR(1)    NOT NULL,   -- I, U, D
+    src_fac_id     INT        NULL,
+    src_mpi_id     INT        NULL,
+    deleted        VARCHAR(1) NULL,
+    admission_date DATETIME   NULL,
+    discharge_date DATETIME   NULL
 );
 GO
 
--- =============================================================================
--- SP: reserve_pk_block
---
--- PURPOSE:
---   Before Spark inserts migrated rows it needs to know what target PKs to
---   assign. This SP reserves a contiguous block of identity values so that:
---     1. Migrated rows get predictable non-colliding PKs.
---     2. Any live inserts on the target after this call get IDs above the block.
---
--- HOW IT WORKS (step by step):
---   1. Acquire an exclusive app lock on the table name so two concurrent callers
---      can't read the same IDENT_CURRENT and reserve overlapping blocks.
---   2. Read IDENT_CURRENT — the highest identity value ever inserted.
---   3. Set @first_id = current + 1 — the start of the reserved block.
---   4. Reseed the identity counter to current + block_size so the next
---      auto-generated INSERT on the table lands above our reserved range.
---   5. Return @first_id so Python knows what ID to assign to its first row.
---
--- EXAMPLE:
---   IDENT_CURRENT = 10, block_size = 5
---   → @first_id = 11  (Python assigns 11, 12, 13, 14, 15 to migrated rows)
---   → identity reseeded to 15
---   → next live INSERT auto-generates 16  ← no collision
--- =============================================================================
+-- ============================================================
+-- STORED PROCEDURES
+-- ============================================================
 
-CREATE PROCEDURE dbo.reserve_pk_block
-    @table_name  NVARCHAR(128),  -- name of the table to reserve IDs on (e.g. 'clients')
-    @block_size  INT,            -- how many IDs to reserve (= number of rows about to be inserted)
-    @first_id    INT OUTPUT      -- returns the first ID in the reserved block
-AS
-BEGIN
-    SET NOCOUNT ON;    -- suppress "rows affected" messages
-    SET XACT_ABORT ON; -- automatically roll back the transaction on any error
-
-    DECLARE @current_max INT;    -- current identity high-water mark
-    DECLARE @sql         NVARCHAR(500);
-    DECLARE @reseed_val  INT;    -- value to reseed identity to after reservation
-    DECLARE @lock_result INT;    -- return code from sp_getapplock; negative = lock failed
-
-    BEGIN TRANSACTION;
-
-    -- Acquire an exclusive application-level lock scoped to this transaction.
-    -- If another session is reserving on the same table at the same time, this
-    -- blocks until they commit — guaranteeing sequential non-overlapping blocks.
-    EXEC @lock_result = sp_getapplock
-        @Resource    = @table_name,   -- lock name is the table name string
-        @LockMode    = 'Exclusive',   -- nobody else can hold any lock on this resource simultaneously
-        @LockOwner   = 'Transaction', -- lock is released automatically when the transaction ends
-        @LockTimeout = 10000;         -- give up and error after 10 seconds rather than wait forever
-
-    IF @lock_result < 0  -- negative return means lock could not be acquired
-    BEGIN
-        ROLLBACK;
-        RAISERROR('Could not acquire lock on %s', 16, 1, @table_name);
-        RETURN;
-    END
-
-    -- Read the current identity high-water mark using dynamic SQL because
-    -- IDENT_CURRENT() requires a string literal table name, not a variable.
-    -- ISNULL(..., 0) handles the case where the table has never had a row inserted.
-    SET @sql = N'SELECT @m = ISNULL(IDENT_CURRENT(''' + @table_name + N'''), 0)';
-    EXEC sp_executesql @sql, N'@m INT OUTPUT', @m = @current_max OUTPUT;
-
-    SET @first_id   = @current_max + 1;          -- first ID Python should use
-    SET @reseed_val = @current_max + @block_size; -- identity jumps to end of reserved range
-
-    -- Reseed the identity counter so the next auto-generated insert on this
-    -- table will get an ID of @reseed_val + 1, safely above our reserved block.
-    SET @sql = N'DBCC CHECKIDENT (''' + @table_name + N''', RESEED, ' + CAST(@reseed_val AS NVARCHAR) + N') WITH NO_INFOMSGS';
-    EXEC sp_executesql @sql;
-
-    COMMIT; -- releases the app lock
-END;
-GO
-
--- =============================================================================
--- SP: load_facility_from_staging
---
--- PURPOSE:
---   Atomically moves pre-mapped facility rows from staging into the live table.
---   Called by Python (via pyodbc) after Spark has written to facility_staging.
---
--- WHY IDENTITY_INSERT ON:
---   By default SQL Server ignores explicit values on IDENTITY columns and
---   generates its own. IDENTITY_INSERT ON overrides this so we can force in
---   the exact reserved PKs that Python pre-calculated.
---
--- TRUNCATE AT END:
---   Empties staging so it's clean for the next run. TRUNCATE is faster than
---   DELETE because it doesn't log individual row deletions.
--- =============================================================================
-
-CREATE PROCEDURE dbo.load_facility_from_staging
+-- reserve_pk_block: acquires exclusive app lock, reserves a contiguous IDENTITY
+-- block, returns the first id in the block. Works for all IDENTITY tables on target.
+CREATE OR ALTER PROCEDURE dbo.reserve_pk_block
+    @table_name NVARCHAR(128),
+    @block_size INT,
+    @first_id   BIGINT OUTPUT
 AS
 BEGIN
     SET NOCOUNT ON;
-    SET XACT_ABORT ON;  -- roll back everything if any statement fails
+    IF @block_size <= 0
+        THROW 50001, 'block_size must be > 0', 1;
 
-    BEGIN TRANSACTION;
+    DECLARE @lock NVARCHAR(255) = N'pk_reserve_' + @table_name;
+    EXEC sp_getapplock @Resource = @lock, @LockMode = 'Exclusive', @LockOwner = 'Session';
 
-    SET IDENTITY_INSERT dbo.facility ON;  -- allow explicit PK values to be inserted
+    DECLARE @cur BIGINT = CAST(ISNULL(IDENT_CURRENT(@table_name), 0) AS BIGINT);
+    SET @first_id = @cur + 1;
+    DBCC CHECKIDENT (@table_name, RESEED, @cur + @block_size) WITH NO_INFOMSGS;
 
-    INSERT INTO dbo.facility (fac_id, name, prov, deleted, src_fac_id)
-    SELECT fac_id, name, prov, deleted, src_fac_id  -- staging already has all values pre-translated
-    FROM dbo.facility_staging;
-
-    SET IDENTITY_INSERT dbo.facility OFF; -- restore normal auto-increment behaviour
-
-    TRUNCATE TABLE dbo.facility_staging;  -- clean up staging for next run
-
-    COMMIT;
+    EXEC sp_releaseapplock @Resource = @lock, @LockOwner = 'Session';
 END;
 GO
 
--- =============================================================================
--- SP: load_clients_from_staging
---
--- PURPOSE:
---   Same pattern as load_facility_from_staging but for clients.
---
--- FK NOTE:
---   clients_staging.fac_id already holds the TARGET fac_id (not source).
---   Python translated it before writing to staging using the fac_pk_map,
---   so no JOIN is needed here — the value is ready to insert directly.
--- =============================================================================
+-- ── Wave 2 ────────────────────────────────────────────────────────────────────
 
-CREATE PROCEDURE dbo.load_clients_from_staging
-AS
+CREATE OR ALTER PROCEDURE dbo.load_facility_from_staging AS
 BEGIN
     SET NOCOUNT ON;
-    SET XACT_ABORT ON;
+    SET IDENTITY_INSERT dbo.facility ON;
+    INSERT INTO dbo.facility (fac_id, src_fac_id, name, prov, deleted)
+    SELECT fac_id, src_fac_id, name, prov, deleted FROM dbo.facility_staging;
+    SET IDENTITY_INSERT dbo.facility OFF;
+    TRUNCATE TABLE dbo.facility_staging;
+END;
+GO
 
-    BEGIN TRANSACTION;
+-- ── Wave 3 ────────────────────────────────────────────────────────────────────
 
-    SET IDENTITY_INSERT dbo.clients ON;  -- allow the reserved PKs to be inserted explicitly
+CREATE OR ALTER PROCEDURE dbo.load_mpi_from_staging AS
+BEGIN
+    SET NOCOUNT ON;
+    SET IDENTITY_INSERT dbo.mpi ON;
+    INSERT INTO dbo.mpi (mpi_id, src_mpi_id, first_name, last_name, date_of_birth,
+                         sex, deleted, created_by, created_date)
+    SELECT mpi_id, src_mpi_id, first_name, last_name, date_of_birth,
+           sex, deleted, created_by, created_date
+    FROM dbo.mpi_staging;
+    SET IDENTITY_INSERT dbo.mpi OFF;
+    TRUNCATE TABLE dbo.mpi_staging;
+END;
+GO
 
-    INSERT INTO dbo.clients (client_id, fac_id, first_name, last_name, deleted, src_client_id)
-    SELECT client_id, fac_id, first_name, last_name, deleted, src_client_id  -- fac_id already translated to target
+CREATE OR ALTER PROCEDURE dbo.load_clients_from_staging AS
+BEGIN
+    SET NOCOUNT ON;
+    SET IDENTITY_INSERT dbo.clients ON;
+    INSERT INTO dbo.clients (client_id, src_client_id, fac_id, mpi_id,
+                             deleted, admission_date, discharge_date, created_by, created_date)
+    SELECT client_id, src_client_id, fac_id, mpi_id,
+           deleted, admission_date, discharge_date, created_by, created_date
     FROM dbo.clients_staging;
-
-    SET IDENTITY_INSERT dbo.clients OFF; -- restore normal auto-increment
-
-    TRUNCATE TABLE dbo.clients_staging;  -- clean up
-
-    COMMIT;
+    SET IDENTITY_INSERT dbo.clients OFF;
+    TRUNCATE TABLE dbo.clients_staging;
 END;
 GO
 
--- =============================================================================
--- SP: apply_clients_delta_from_staging
---
--- PURPOSE:
---   Applies CT delta changes from clients_delta_staging to the live clients
---   table. Called after each CT delta run (Job 3 in the pipeline).
---
--- OPERATION TYPES:
---   D (hard delete on source)
---     → soft delete on target (set deleted = 'Y')
---     → we never hard-delete on target because child rows elsewhere may still
---       reference this client; a hard delete would break FK constraints.
---
---   U (update on source)
---     → update the matching target row found via src_client_id
---     → src_client_id is the permanent stable link between source and target rows
---
---   I (new insert on source after the mirror snapshot)
---     → reserve one PK block for ALL new rows in this batch (one SP call = efficient)
---     → translate fac_id: staging holds the SOURCE fac_id; JOIN facility on
---       src_fac_id to find the corresponding TARGET fac_id before inserting
---
--- WHY D AND U RUN BEFORE I:
---   A row could be deleted and re-inserted in the same delta window.
---   Running D first clears the old row; I then re-adds it cleanly.
---
--- TRUNCATE AT END:
---   Empties staging so the next delta run starts fresh.
--- =============================================================================
+-- ── Wave 5 ────────────────────────────────────────────────────────────────────
 
-CREATE PROCEDURE dbo.apply_clients_delta_from_staging
-AS
+CREATE OR ALTER PROCEDURE dbo.load_pho_phys_order_from_staging AS
 BEGIN
     SET NOCOUNT ON;
-    SET XACT_ABORT ON;  -- roll back the entire transaction if any statement fails
+    SET IDENTITY_INSERT dbo.pho_phys_order ON;
+    INSERT INTO dbo.pho_phys_order (phys_order_id, src_phys_order_id, client_id, fac_id,
+                                    drug_name, strength, directions, order_date,
+                                    active_flag, deleted, created_by, created_date)
+    SELECT phys_order_id, src_phys_order_id, client_id, fac_id,
+           drug_name, strength, directions, order_date,
+           active_flag, deleted, created_by, created_date
+    FROM dbo.pho_phys_order_staging;
+    SET IDENTITY_INSERT dbo.pho_phys_order OFF;
+    TRUNCATE TABLE dbo.pho_phys_order_staging;
+END;
+GO
 
-    BEGIN TRANSACTION;
+CREATE OR ALTER PROCEDURE dbo.load_pho_order_schedule_from_staging AS
+BEGIN
+    SET NOCOUNT ON;
+    SET IDENTITY_INSERT dbo.pho_order_schedule ON;
+    INSERT INTO dbo.pho_order_schedule (order_schedule_id, src_order_schedule_id, phys_order_id,
+                                        fac_id, deleted, dose_value, directions,
+                                        mon, tues, wed, thurs, fri, sat, sun,
+                                        created_by, created_date)
+    SELECT order_schedule_id, src_order_schedule_id, phys_order_id,
+           fac_id, deleted, dose_value, directions,
+           mon, tues, wed, thurs, fri, sat, sun,
+           created_by, created_date
+    FROM dbo.pho_order_schedule_staging;
+    SET IDENTITY_INSERT dbo.pho_order_schedule OFF;
+    TRUNCATE TABLE dbo.pho_order_schedule_staging;
+END;
+GO
 
-    -- -------------------------------------------------------------------------
-    -- Step 1: Apply hard deletes from source as soft deletes on target.
-    -- Match rows using src_client_id — the permanent source→target link.
-    -- -------------------------------------------------------------------------
-    UPDATE c SET c.deleted = 'Y'                    -- mark as deleted without removing the row
-    FROM dbo.clients c
-    INNER JOIN dbo.clients_delta_staging s
-        ON c.src_client_id = s.src_client_id        -- find the target row that corresponds to the source row
-    WHERE s.operation = 'D';                        -- only process hard-delete events
+-- ── Wave 6 ────────────────────────────────────────────────────────────────────
 
-    -- -------------------------------------------------------------------------
-    -- Step 2: Apply updates — propagate name and deleted flag changes.
-    -- -------------------------------------------------------------------------
-    UPDATE c SET
-        c.first_name = s.first_name,                -- overwrite with latest value from source
-        c.last_name  = s.last_name,
-        c.deleted    = s.deleted                    -- propagates soft deletes from source too
-    FROM dbo.clients c
-    INNER JOIN dbo.clients_delta_staging s
-        ON c.src_client_id = s.src_client_id        -- find the target row by its source ID
-    WHERE s.operation = 'U';                        -- only process update events
+CREATE OR ALTER PROCEDURE dbo.load_pho_schedule_from_staging AS
+BEGIN
+    SET NOCOUNT ON;
+    SET IDENTITY_INSERT dbo.pho_schedule ON;
+    INSERT INTO dbo.pho_schedule (schedule_id, src_schedule_id, order_schedule_id, phys_order_id,
+                                  fac_id, deleted, description, start_time, dose,
+                                  created_by, created_date)
+    SELECT schedule_id, src_schedule_id, order_schedule_id, phys_order_id,
+           fac_id, deleted, description, start_time, dose,
+           created_by, created_date
+    FROM dbo.pho_schedule_staging;
+    SET IDENTITY_INSERT dbo.pho_schedule OFF;
+    TRUNCATE TABLE dbo.pho_schedule_staging;
+END;
+GO
 
-    -- -------------------------------------------------------------------------
-    -- Step 3: Insert new rows that appeared on source after the mirror snapshot.
-    -- -------------------------------------------------------------------------
-    DECLARE @insert_count INT = (
+CREATE OR ALTER PROCEDURE dbo.load_pho_schedule_details_from_staging AS
+BEGIN
+    SET NOCOUNT ON;
+    SET IDENTITY_INSERT dbo.pho_schedule_details ON;
+    INSERT INTO dbo.pho_schedule_details (pho_schedule_detail_id, src_pho_schedule_detail_id,
+                                          pho_schedule_id, schedule_date, dose, deleted,
+                                          perform_by, perform_date, perform_initials,
+                                          created_by, created_date)
+    SELECT pho_schedule_detail_id, src_pho_schedule_detail_id,
+           pho_schedule_id, schedule_date, dose, deleted,
+           perform_by, perform_date, perform_initials,
+           created_by, created_date
+    FROM dbo.pho_schedule_details_staging;
+    SET IDENTITY_INSERT dbo.pho_schedule_details OFF;
+    TRUNCATE TABLE dbo.pho_schedule_details_staging;
+END;
+GO
+
+-- ── CT Delta ──────────────────────────────────────────────────────────────────
+-- Applies I/U/D changes from clients_delta_staging to target clients table.
+-- staging stores source IDs (src_fac_id, src_mpi_id); SP resolves to target IDs
+-- via facility.src_fac_id and mpi.src_mpi_id — same pattern as production notebook.
+
+CREATE OR ALTER PROCEDURE dbo.apply_clients_delta_from_staging AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Step 1: Hard deletes on source → soft deletes on target (preserve FK integrity).
+    UPDATE c
+    SET    c.deleted = 'Y'
+    FROM   dbo.clients c
+    JOIN   dbo.clients_delta_staging s ON s.src_client_id = c.src_client_id
+    WHERE  s.operation = 'D';
+
+    -- Step 2: Updates — propagate column changes, remapping src IDs to target IDs.
+    UPDATE c
+    SET    c.fac_id         = ISNULL(f.fac_id,        c.fac_id),
+           c.mpi_id         = ISNULL(m.mpi_id,        c.mpi_id),
+           c.deleted        = ISNULL(s.deleted,        c.deleted),
+           c.admission_date = ISNULL(s.admission_date, c.admission_date),
+           c.discharge_date = s.discharge_date
+    FROM   dbo.clients c
+    JOIN   dbo.clients_delta_staging s  ON s.src_client_id = c.src_client_id
+    LEFT JOIN dbo.facility f            ON f.src_fac_id    = s.src_fac_id
+    LEFT JOIN dbo.mpi      m            ON m.src_mpi_id    = s.src_mpi_id
+    WHERE  s.operation = 'U';
+
+    -- Step 3: Inserts — reserve a PK block, then insert with target IDs.
+    DECLARE @new_rows INT = (
         SELECT COUNT(*) FROM dbo.clients_delta_staging WHERE operation = 'I'
-    );  -- count new rows so we can reserve exactly the right number of PKs
-
-    IF @insert_count > 0  -- skip reservation and insert entirely if nothing to insert
+    );
+    IF @new_rows > 0
     BEGIN
-        DECLARE @first_id INT;
+        DECLARE @first_id BIGINT;
+        EXEC dbo.reserve_pk_block 'clients', @new_rows, @first_id OUTPUT;
 
-        -- Reserve a contiguous block of PKs for all inserts in this batch.
-        -- One reservation call for the whole batch is more efficient than
-        -- calling reserve_pk_block once per row.
-        EXEC dbo.reserve_pk_block
-            @table_name = 'clients',
-            @block_size = @insert_count,    -- reserve exactly as many IDs as there are new rows
-            @first_id   = @first_id OUTPUT; -- @first_id is the start of the reserved range
+        SET IDENTITY_INSERT dbo.clients ON;
+        INSERT INTO dbo.clients (client_id, src_client_id, fac_id, mpi_id,
+                                 deleted, admission_date, discharge_date)
+        SELECT CAST(@first_id AS INT) + ROW_NUMBER() OVER (ORDER BY s.src_client_id) - 1,
+               s.src_client_id,
+               f.fac_id,
+               m.mpi_id,
+               ISNULL(s.deleted, 'N'),
+               s.admission_date,
+               s.discharge_date
+        FROM   dbo.clients_delta_staging s
+        JOIN   dbo.facility f  ON f.src_fac_id = s.src_fac_id
+        LEFT JOIN dbo.mpi   m  ON m.src_mpi_id = s.src_mpi_id
+        WHERE  s.operation = 'I';
+        SET IDENTITY_INSERT dbo.clients OFF;
+    END;
 
-        SET IDENTITY_INSERT dbo.clients ON; -- allow explicit PK values
-
-        -- ROW_NUMBER() assigns sequential offsets (0, 1, 2...) within the reserved block.
-        -- e.g. if @first_id = 101 and there are 3 rows: IDs 101, 102, 103 are assigned.
-        -- JOIN on facility.src_fac_id translates source fac_id → target fac_id
-        -- (staging holds the source fac_id; we need the target fac_id for the FK).
-        INSERT INTO dbo.clients (client_id, fac_id, first_name, last_name, deleted, src_client_id)
-        SELECT
-            @first_id + ROW_NUMBER() OVER (ORDER BY s.src_client_id) - 1,  -- assigned target PK within reserved block
-            f.fac_id,           -- target fac_id looked up via facility.src_fac_id
-            s.first_name,
-            s.last_name,
-            s.deleted,
-            s.src_client_id     -- preserve source ID for future delta matching
-        FROM dbo.clients_delta_staging s
-        INNER JOIN dbo.facility f
-            ON f.src_fac_id = s.fac_id  -- translate source fac_id to target fac_id
-        WHERE s.operation = 'I';        -- only process insert events
-
-        SET IDENTITY_INSERT dbo.clients OFF; -- restore normal auto-increment
-    END
-
-    TRUNCATE TABLE dbo.clients_delta_staging;  -- empty staging; next delta run starts clean
-
-    COMMIT;
+    TRUNCATE TABLE dbo.clients_delta_staging;
 END;
 GO
